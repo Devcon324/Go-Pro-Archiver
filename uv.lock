@@ -78,7 +78,7 @@ wheels = [
 
 [[package]]
 name = "gopro-footage-archiver"
-version = "0.1.2"
+version = "0.1.4"
 source = { editable = "." }
 dependencies = [
     { name = "av" },
