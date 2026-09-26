@@ -8,6 +8,28 @@ import pytest
 import gopro_archiver
 
 
+def stat_with_capture_date(path, capture_dates, original_stat):
+    """Return a stat result whose mtime and ctime match a patched capture date.
+
+    Windows reads st_ctime; other platforms fall back to st_mtime when birth time
+    is unavailable. Setting both keeps these tests valid on either platform.
+    """
+    stat_result = original_stat(path)
+    capture_date = capture_dates(path) if callable(capture_dates) else capture_dates.get(path)
+    if capture_date is None:
+        return stat_result
+
+    timestamp = (
+        capture_date.timestamp()
+        if isinstance(capture_date, datetime)
+        else datetime.combine(capture_date, datetime.min.time()).timestamp()
+    )
+    values = list(stat_result)
+    values[8] = timestamp  # st_mtime
+    values[9] = timestamp  # st_ctime
+    return os.stat_result(values)
+
+
 def test_parse_version_file(tmp_path):
     version_file = tmp_path / "version.txt"
     version_file.write_text(
@@ -83,16 +105,11 @@ def test_collect_mp4_files_date_range_is_inclusive(tmp_path, monkeypatch):
         files[3]: date(2026, 1, 21),
     }
     original_stat = Path.stat
-
-    def stat_with_creation_date(path, *args, **kwargs):
-        stat_result = original_stat(path, *args, **kwargs)
-        if path in creation_dates:
-            values = list(stat_result)
-            values[9] = datetime.combine(creation_dates[path], datetime.min.time()).timestamp()
-            return os.stat_result(values)
-        return stat_result
-
-    monkeypatch.setattr(Path, "stat", stat_with_creation_date)
+    monkeypatch.setattr(
+        Path,
+        "stat",
+        lambda path, *args, **kwargs: stat_with_capture_date(path, creation_dates, original_stat),
+    )
 
     result = gopro_archiver.collect_mp4_files(base, date(2026, 1, 10), date(2026, 1, 20))
 
@@ -108,17 +125,15 @@ def test_get_mp4_selection_size_uses_date_range(tmp_path, monkeypatch):
     excluded.write_bytes(b"123456789")
 
     original_stat = Path.stat
-
-    def stat_with_creation_date(path, *args, **kwargs):
-        stat_result = original_stat(path, *args, **kwargs)
-        values = list(stat_result)
-        values[9] = datetime.combine(
-            date(2026, 1, 15) if path == selected else date(2026, 1, 9),
-            datetime.min.time(),
-        ).timestamp()
-        return os.stat_result(values)
-
-    monkeypatch.setattr(Path, "stat", stat_with_creation_date)
+    monkeypatch.setattr(
+        Path,
+        "stat",
+        lambda path, *args, **kwargs: stat_with_capture_date(
+            path,
+            lambda item: date(2026, 1, 15) if item == selected else date(2026, 1, 9),
+            original_stat,
+        ),
+    )
 
     result = gopro_archiver.get_mp4_selection_size(base, date(2026, 1, 10), date(2026, 1, 20))
 
@@ -129,16 +144,15 @@ def test_get_archive_target_path_uses_year_and_date(tmp_path, monkeypatch):
     source_file = tmp_path / "12345678.MP4"
     source_file.write_bytes(b"sample")
     original_stat = Path.stat
-
-    def stat_with_creation_date(path, *args, **kwargs):
-        stat_result = original_stat(path, *args, **kwargs)
-        if path == source_file:
-            values = list(stat_result)
-            values[9] = datetime(2026, 9, 22).timestamp()
-            return os.stat_result(values)
-        return stat_result
-
-    monkeypatch.setattr(Path, "stat", stat_with_creation_date)
+    monkeypatch.setattr(
+        Path,
+        "stat",
+        lambda path, *args, **kwargs: stat_with_capture_date(
+            path,
+            {source_file: datetime(2026, 9, 22)},
+            original_stat,
+        ),
+    )
 
     result = gopro_archiver.get_archive_target_path(tmp_path / "archive", source_file)
 
@@ -165,16 +179,15 @@ def test_resolve_archive_target_renames_different_collision(tmp_path, monkeypatc
     destination_file.parent.mkdir(parents=True)
     destination_file.write_bytes(b"different footage")
     original_stat = Path.stat
-
-    def stat_with_creation_date(path, *args, **kwargs):
-        stat_result = original_stat(path, *args, **kwargs)
-        if path == source_file:
-            values = list(stat_result)
-            values[9] = datetime(2026, 9, 22).timestamp()
-            return os.stat_result(values)
-        return stat_result
-
-    monkeypatch.setattr(Path, "stat", stat_with_creation_date)
+    monkeypatch.setattr(
+        Path,
+        "stat",
+        lambda path, *args, **kwargs: stat_with_capture_date(
+            path,
+            {source_file: datetime(2026, 9, 22)},
+            original_stat,
+        ),
+    )
 
     target, action = gopro_archiver.resolve_archive_target_path(tmp_path / "archive", source_file)
 
@@ -207,16 +220,15 @@ def test_resolve_archive_target_skips_identical_renamed_collision(tmp_path, monk
     destination_file.write_bytes(b"different")
     renamed_file.write_bytes(b"same footage")
     original_stat = Path.stat
-
-    def stat_with_creation_date(path, *args, **kwargs):
-        stat_result = original_stat(path, *args, **kwargs)
-        if path == source_file:
-            values = list(stat_result)
-            values[9] = datetime(2026, 9, 22).timestamp()
-            return os.stat_result(values)
-        return stat_result
-
-    monkeypatch.setattr(Path, "stat", stat_with_creation_date)
+    monkeypatch.setattr(
+        Path,
+        "stat",
+        lambda path, *args, **kwargs: stat_with_capture_date(
+            path,
+            {source_file: datetime(2026, 9, 22)},
+            original_stat,
+        ),
+    )
 
     folder_indexes = gopro_archiver.build_destination_indexes(tmp_path / "archive", [source_file])
     target, action = gopro_archiver.resolve_archive_target_path(
@@ -237,16 +249,15 @@ def test_analyze_archive_status_marks_missing_and_archived(tmp_path, monkeypatch
     archived.write_bytes(b"same footage")
     missing.write_bytes(b"new footage")
     original_stat = Path.stat
-
-    def stat_with_creation_date(path, *args, **kwargs):
-        stat_result = original_stat(path, *args, **kwargs)
-        if path in {archived, missing}:
-            values = list(stat_result)
-            values[9] = datetime(2026, 9, 22).timestamp()
-            return os.stat_result(values)
-        return stat_result
-
-    monkeypatch.setattr(Path, "stat", stat_with_creation_date)
+    monkeypatch.setattr(
+        Path,
+        "stat",
+        lambda path, *args, **kwargs: stat_with_capture_date(
+            path,
+            {archived: datetime(2026, 9, 22), missing: datetime(2026, 9, 22)},
+            original_stat,
+        ),
+    )
 
     destination_file = gopro_archiver.get_archive_target_path(tmp_path / "archive", archived)
     destination_file.parent.mkdir(parents=True)
