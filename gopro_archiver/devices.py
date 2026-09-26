@@ -25,6 +25,34 @@ def parse_version_file(path: str | os.PathLike[str]) -> dict:
     return {}
 
 
+def _safe_is_dir(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def _safe_iterdir(path: Path) -> list[Path]:
+    try:
+        return list(path.iterdir())
+    except OSError:
+        return []
+
+
+def _add_removable_media_paths(add) -> None:
+    """Scan /media and /run/media (user + volume). Skip /mnt — psutil already lists those mounts."""
+    for base in (Path("/media"), Path("/run/media")):
+        if not _safe_is_dir(base):
+            continue
+        for entry in _safe_iterdir(base):
+            if not _safe_is_dir(entry):
+                continue
+            add(str(entry))
+            for nested in _safe_iterdir(entry):
+                if _safe_is_dir(nested):
+                    add(str(nested))
+
+
 def collect_mount_points() -> list[str]:
     mount_points: list[str] = []
     seen: set[str] = set()
@@ -40,15 +68,7 @@ def collect_mount_points() -> list[str]:
         add(part.mountpoint)
 
     if sys.platform != "win32":
-        for base in (Path("/media"), Path("/run/media"), Path("/mnt")):
-            if not base.is_dir():
-                continue
-            for entry in base.iterdir():
-                if entry.is_dir():
-                    add(str(entry))
-                    for nested in entry.iterdir():
-                        if nested.is_dir():
-                            add(str(nested))
+        _add_removable_media_paths(add)
 
     return mount_points
 
@@ -60,12 +80,18 @@ def find_gopro_devices(paths: Iterable[str] | None = None) -> list[dict]:
     devices: list[dict] = []
     for root in paths:
         drive = Path(root)
-        if not drive.exists():
+        try:
+            if not drive.exists():
+                continue
+        except OSError:
             continue
 
         version_file = drive / "MISC" / "version.txt"
         dcim_dir = drive / "DCIM" / "100GOPRO"
-        if not version_file.exists() or not dcim_dir.exists():
+        try:
+            if not version_file.exists() or not dcim_dir.exists():
+                continue
+        except OSError:
             continue
 
         metadata = parse_version_file(version_file)
