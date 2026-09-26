@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Read version from tag
+        id: version
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Building version $TAG"
+
+      - name: Build release executables
+        run: |
+          uv run pyinstaller packaging/gopro_archiver.spec --noconfirm --clean
+          uv run pyinstaller packaging/uninstall.spec --noconfirm
+
+      - name: Create ZIP archive (two EXEs only)
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.tag }}"
+          $app = "dist/GoPro-Footage-Archiver.exe"
+          $uninstall = "dist/Uninstall.exe"
+          $zip = "dist/GoPro-Footage-Archiver-${version}-windows-x64.zip"
+          if (-not (Test-Path $app)) { throw "Missing $app" }
+          if (-not (Test-Path $uninstall)) { throw "Missing $uninstall" }
+          Compress-Archive -Path $app, $uninstall -DestinationPath $zip -Force
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/GoPro-Footage-Archiver-${{ steps.version.outputs.tag }}-windows-x64.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

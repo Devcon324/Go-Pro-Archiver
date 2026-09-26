@@ -14,6 +14,7 @@ from gopro_archiver.archive import analyze_archive_status, collect_mp4_files
 from gopro_archiver.devices import find_gopro_devices
 from gopro_archiver.formatters import format_bytes, format_duration, format_speed
 from gopro_archiver.metadata import get_storage_usage, get_video_metadata
+from gopro_archiver.settings import load_favorite_destinations, save_favorite_destinations
 from gopro_archiver.transfer import TransferThread
 
 
@@ -38,7 +39,7 @@ class GoProArchiverApp(ctk.CTk):
         forest_theme["CTkOptionMenu"]["button_color"] = ["#238636", "#196c2e"]
         forest_theme["CTkOptionMenu"]["button_hover_color"] = ["#1f883d", "#145c27"]
 
-        self.favorites = []
+        self.favorites = load_favorite_destinations()
         self.detected_devices = []
         self.selected_device = None
         self.transfer_thread = None
@@ -744,11 +745,15 @@ class GoProArchiverApp(ctk.CTk):
         canvas.create_arc(left, top, left + radius * 2, bottom, start=90, extent=180, fill=color, outline="")
         canvas.create_arc(right - radius * 2, top, right, bottom, start=-90, extent=180, fill=color, outline="")
 
+    def persist_favorites(self) -> None:
+        save_favorite_destinations(self.favorites)
+
     def save_favorite_destination(self):
         if not self.destination_var.get():
             return
         if self.destination_var.get() not in self.favorites:
             self.favorites.append(self.destination_var.get())
+            self.persist_favorites()
         self.refresh_favorites()
         self.update_storage_display()
 
@@ -775,6 +780,7 @@ class GoProArchiverApp(ctk.CTk):
         current_value = self.favorite_menu.get()
         if current_value in self.favorites:
             self.favorites.remove(current_value)
+            self.persist_favorites()
             self.destination_var.set("")
             self.refresh_favorites()
             self.update_storage_display()
