@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Iterable
+
+from gopro_archiver.files import get_file_capture_date
 
 IDENTICAL_SAMPLE_BYTES = 256 * 1024
 
@@ -22,7 +24,7 @@ def collect_mp4_files(
         if not item.is_file() or item.suffix.lower() != ".mp4":
             continue
         if start_date is not None or end_date is not None:
-            created_date = datetime.fromtimestamp(item.stat().st_ctime).date()
+            created_date = get_file_capture_date(item)
             if start_date is not None and created_date < start_date:
                 continue
             if end_date is not None and created_date > end_date:
@@ -42,7 +44,7 @@ def get_mp4_selection_size(
 
 def get_archive_target_path(destination_dir: str | os.PathLike[str], file_path: str | os.PathLike[str]) -> Path:
     source_file = Path(file_path)
-    file_date = datetime.fromtimestamp(source_file.stat().st_ctime).date()
+    file_date = get_file_capture_date(source_file)
     return Path(destination_dir) / str(file_date.year) / file_date.isoformat() / source_file.name
 
 

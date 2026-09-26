@@ -11,6 +11,7 @@ import customtkinter as ctk
 from tkcalendar import Calendar
 
 from gopro_archiver.archive import analyze_archive_status, collect_mp4_files
+from gopro_archiver.files import get_file_capture_date
 from gopro_archiver.devices import find_gopro_devices
 from gopro_archiver.formatters import format_bytes, format_duration, format_speed
 from gopro_archiver.metadata import get_storage_usage, get_video_metadata
@@ -483,7 +484,7 @@ class GoProArchiverApp(ctk.CTk):
         file_rows = [
             (
                 file_path,
-                datetime.fromtimestamp(file_path.stat().st_ctime).date(),
+                get_file_capture_date(file_path),
                 file_path.stat().st_size,
             )
             for file_path in files

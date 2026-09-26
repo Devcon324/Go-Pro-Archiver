@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Iterable
 
@@ -24,9 +25,37 @@ def parse_version_file(path: str | os.PathLike[str]) -> dict:
     return {}
 
 
+def collect_mount_points() -> list[str]:
+    mount_points: list[str] = []
+    seen: set[str] = set()
+
+    def add(candidate: str) -> None:
+        normalized = os.path.normpath(candidate)
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        mount_points.append(normalized)
+
+    for part in psutil.disk_partitions(all=True):
+        add(part.mountpoint)
+
+    if sys.platform != "win32":
+        for base in (Path("/media"), Path("/run/media"), Path("/mnt")):
+            if not base.is_dir():
+                continue
+            for entry in base.iterdir():
+                if entry.is_dir():
+                    add(str(entry))
+                    for nested in entry.iterdir():
+                        if nested.is_dir():
+                            add(str(nested))
+
+    return mount_points
+
+
 def find_gopro_devices(paths: Iterable[str] | None = None) -> list[dict]:
     if paths is None:
-        paths = [part.mountpoint for part in psutil.disk_partitions(all=False)]
+        paths = collect_mount_points()
 
     devices: list[dict] = []
     for root in paths:

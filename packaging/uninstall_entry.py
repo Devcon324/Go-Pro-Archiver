@@ -45,10 +45,13 @@ def main() -> None:
             "Could not remove all app data.\nClose GoPro Footage Archiver and try again.",
         )
     else:
+        if sys.platform == "win32":
+            cleanup = "GoPro-Footage-Archiver.exe and Uninstall.exe"
+        else:
+            cleanup = "GoPro-Footage-Archiver and Uninstall"
         messagebox.showinfo(
             "Uninstall",
-            "App data removed.\n\n"
-            "You can delete GoPro-Footage-Archiver.exe and Uninstall.exe from this folder.",
+            f"App data removed.\n\nYou can delete {cleanup} from this folder.",
         )
     root.destroy()
 

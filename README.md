@@ -2,7 +2,7 @@
 
 **Plug in your GoPro. Pick your archive. Copy only what’s missing.**
 
-A fast, friendly desktop app for Windows (and other platforms with Python) that pulls `.MP4` clips off your GoPro SD card, sorts them by date, and skips footage you’ve already archived — without re-reading gigabytes of video every time.
+A fast, friendly desktop app for **Windows and Linux** that pulls `.MP4` clips off your GoPro SD card, sorts them by date, and skips footage you’ve already archived — without re-reading gigabytes of video every time.
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/3da7915c-fd01-46ee-82f0-fecf54948fea" alt="GoPro Footage Archiver screenshot" width="900" />
@@ -23,53 +23,79 @@ GoPro cards fill up fast. Copying everything by hand is slow, and re-copying the
 
 ---
 
-## Download (Windows)
+## Download
 
-No Python required. Each release is **two files**:
+No Python required. Open **[Releases](https://github.com/devcon324/gopro-footage-archiver/releases)** and pick your platform. Each release ships **two programs** (app + uninstall).
+
+### Windows
+
+Download **`GoPro-Footage-Archiver-x.x.x-windows-x64.zip`**.
 
 | File | What it does |
 |------|----------------|
-| **`GoPro-Footage-Archiver.exe`** | The app — double-click to run |
-| **`Uninstall.exe`** | Removes saved favourites/settings (not your archived videos) |
+| **`GoPro-Footage-Archiver.exe`** | The app |
+| **`Uninstall.exe`** | Removes saved favourites/settings |
 
-1. Open **[Releases](https://github.com/devcon324/gopro-footage-archiver/releases)**.
-2. Download **`GoPro-Footage-Archiver-x.x.x-windows-x64.zip`**.
-3. Extract both `.exe` files to a folder (e.g. `Desktop\GoPro Footage Archiver\`).
-4. Double-click **`GoPro-Footage-Archiver.exe`**.
+Extract both to a folder and run **`GoPro-Footage-Archiver.exe`**.
 
-Windows may show SmartScreen the first time (“Windows protected your PC”) — choose **More info → Run anyway** if you trust the release. The app is not code-signed yet.
+Windows may show SmartScreen the first time — choose **More info → Run anyway** if you trust the release.
 
-### Uninstall
+Settings: `%APPDATA%\GoProFootageArchiver`
 
-1. Run **`Uninstall.exe`** (keep it in the same folder as the app).
-2. Delete **`GoPro-Footage-Archiver.exe`** and **`Uninstall.exe`** if you no longer need them.
+### Linux
 
-Saved data lives in `%APPDATA%\GoProFootageArchiver`. **`Uninstall.exe`** clears that folder only — your archive of MP4s is never touched.
+Download **`GoPro-Footage-Archiver-x.x.x-linux-x64.tar.gz`**.
+
+```bash
+tar xzf GoPro-Footage-Archiver-x.x.x-linux-x64.tar.gz
+chmod +x GoPro-Footage-Archiver Uninstall
+./GoPro-Footage-Archiver
+```
+
+| File | What it does |
+|------|----------------|
+| **`GoPro-Footage-Archiver`** | The app |
+| **`Uninstall`** | Removes saved favourites/settings |
+
+You may need desktop libraries for Tk (Ubuntu/Debian example):
+
+```bash
+sudo apt install libgl1 libglib2.0-0 libxrender1 libxext6
+```
+
+Settings: `~/.config/GoProFootageArchiver/`
+
+### Uninstall (both platforms)
+
+1. Run **`Uninstall`** / **`Uninstall.exe`** next to the app.
+2. Delete the app files when you are done.
+
+Your archived MP4 folders are never deleted by the uninstaller.
 
 ---
 
 ## Build from source (developers)
 
-Windows `.exe` builds are supported on **Windows**. You can run the app from source on any OS with Python 3.13+.
+Run from source on **Windows or Linux** with Python 3.13+. Release binaries are built on GitHub Actions for both platforms.
 
 ### 1. Prerequisites
 
 | Tool | Notes |
 |------|--------|
-| **Windows 10/11** | Required to build the release `.exe` files |
+| **Windows 10/11** or **Linux** | Match the OS you want to build a release for |
 | **Python 3.13+** | Matches `.python-version` in the repo |
 | **[uv](https://docs.astral.sh/uv/getting-started/installation/)** | Installs Python and dependencies |
 
-Install uv (PowerShell):
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) for your OS, then verify:
 
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```bash
+uv --version
 ```
 
-Restart the terminal, then verify:
+**Linux — Tk / GUI libraries** (required to run or build the UI):
 
-```powershell
-uv --version
+```bash
+sudo apt install python3-tk tk-dev libgl1 libglib2.0-0 libxrender1 libxext6
 ```
 
 ### 2. Clone the repository
@@ -109,9 +135,19 @@ uv run pytest
 
 All tests are headless (no GUI window required).
 
-### 6. Build the Windows release (two `.exe` files)
+### 6. Build release binaries
 
-From the **repo root** on Windows (must be Windows to produce `.exe` files):
+Build on the **same OS** you are targeting (Windows → `.exe`, Linux → standalone binaries).
+
+**Linux:**
+
+```bash
+./scripts/build_linux.sh
+```
+
+Output: `dist/GoPro-Footage-Archiver` and `dist/Uninstall`
+
+**Windows:**
 
 **Git Bash / WSL / any shell:**
 
@@ -173,8 +209,7 @@ Releases are built automatically when you push a **version tag**. Workflow: [`.g
    ```
 
 4. Open **Actions** on GitHub and wait for the **Release** workflow to finish.
-5. Open **Releases** — the workflow uploads
-   `GoPro-Footage-Archiver-0.1.0-windows-x64.zip` containing the two EXEs.
+5. Open **Releases** — the workflow uploads the Windows ZIP and Linux `.tar.gz`.
 
 If the workflow fails, check the PyInstaller step logs on the `windows-latest` runner.
 
@@ -204,7 +239,8 @@ gopro-footage-archiver/
 │   ├── __main__.py          # Entry point: python -m gopro_archiver
 │   ├── app_paths.py         # AppData paths (favourites file)
 │   ├── settings.py          # Load/save favourites
-│   ├── devices.py           # GoPro detection & version.txt parsing
+│   ├── devices.py           # GoPro detection & mount points (incl. /media on Linux)
+│   ├── files.py             # Cross-platform clip date for archive paths
 │   ├── archive.py           # Paths, dedup, analyze, file collection
 │   ├── transfer.py          # Background copy thread & progress
 │   ├── metadata.py          # Video probe (PyAV) & disk usage
@@ -216,8 +252,9 @@ gopro-footage-archiver/
 │   ├── uninstall.spec       # PyInstaller spec — Uninstall.exe
 │   └── uninstall_entry.py   # Standalone uninstall script
 ├── scripts/
-│   ├── build_windows.sh     # One-command Windows release build (bash)
-│   └── build_windows.ps1    # Same build for PowerShell
+│   ├── build_linux.sh       # Linux release build
+│   ├── build_windows.sh     # Windows release build (bash)
+│   └── build_windows.ps1    # Windows release build (PowerShell)
 ├── .github/workflows/
 │   └── release.yml          # Tag → build ZIP → GitHub Release
 ├── tests/
@@ -231,7 +268,7 @@ Core logic lives outside the UI so behaviour stays testable and easy to extend.
 
 ## Archive layout
 
-Each clip lands under the date taken (from file creation time):
+Each clip lands under the date taken (creation time on Windows; modification time on Linux when birth time is unavailable):
 
 ```
 YourArchive/
