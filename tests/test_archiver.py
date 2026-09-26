@@ -1,0 +1,211 @@
+import json
+import os
+from datetime import date, datetime
+from pathlib import Path
+
+import pytest
+
+import gopro_archiver
+
+
+def test_parse_version_file(tmp_path):
+    version_file = tmp_path / "version.txt"
+    version_file.write_text(
+        json.dumps(
+            {
+                "info version": "2.0",
+                "firmware version": "H25.03.02.10.00",
+                "camera type": "LIT HERO",
+                "camera serial number": "C3594224694726",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    parsed = gopro_archiver.parse_version_file(version_file)
+
+    assert parsed["firmware version"] == "H25.03.02.10.00"
+    assert parsed["camera type"] == "LIT HERO"
+
+
+def test_detect_gopro_devices(tmp_path):
+    source = tmp_path / "GOPRO"
+    (source / "DCIM" / "100GOPRO").mkdir(parents=True)
+    (source / "MISC").mkdir(parents=True)
+    (source / "MISC" / "version.txt").write_text(
+        json.dumps({"camera type": "HERO", "camera serial number": "ABC123"}),
+        encoding="utf-8",
+    )
+
+    discovered = gopro_archiver.find_gopro_devices([str(source)])
+
+    assert len(discovered) == 1
+    assert discovered[0]["drive"] == str(source)
+    assert discovered[0]["camera_type"] == "HERO"
+
+
+def test_collect_mp4_files_only(tmp_path):
+    base = tmp_path / "clip"
+    clips = [
+        base / "video1.mp4",
+        base / "video2.MP4",
+        base / "thumb.thm",
+        base / "preview.lrv",
+        base / "nested" / "video3.mp4",
+    ]
+
+    for item in clips:
+        item.parent.mkdir(parents=True, exist_ok=True)
+        item.write_bytes(b"sample")
+
+    result = gopro_archiver.collect_mp4_files(base)
+
+    normalized = {os.path.normpath(str(path.relative_to(base))) for path in result}
+
+    assert normalized == {
+        "video1.mp4",
+        "video2.MP4",
+        os.path.normpath("nested/video3.mp4"),
+    }
+
+
+def test_collect_mp4_files_date_range_is_inclusive(tmp_path, monkeypatch):
+    base = tmp_path / "clip"
+    files = [base / "before.mp4", base / "start.mp4", base / "end.mp4", base / "after.mp4"]
+    for item in files:
+        item.parent.mkdir(parents=True, exist_ok=True)
+        item.write_bytes(b"sample")
+
+    creation_dates = {
+        files[0]: date(2026, 1, 9),
+        files[1]: date(2026, 1, 10),
+        files[2]: date(2026, 1, 20),
+        files[3]: date(2026, 1, 21),
+    }
+    original_stat = Path.stat
+
+    def stat_with_creation_date(path, *args, **kwargs):
+        stat_result = original_stat(path, *args, **kwargs)
+        if path in creation_dates:
+            values = list(stat_result)
+            values[9] = datetime.combine(creation_dates[path], datetime.min.time()).timestamp()
+            return os.stat_result(values)
+        return stat_result
+
+    monkeypatch.setattr(Path, "stat", stat_with_creation_date)
+
+    result = gopro_archiver.collect_mp4_files(base, date(2026, 1, 10), date(2026, 1, 20))
+
+    assert {path.name for path in result} == {"start.mp4", "end.mp4"}
+
+
+def test_get_mp4_selection_size_uses_date_range(tmp_path, monkeypatch):
+    base = tmp_path / "clip"
+    selected = base / "selected.mp4"
+    excluded = base / "excluded.mp4"
+    selected.parent.mkdir(parents=True)
+    selected.write_bytes(b"12345")
+    excluded.write_bytes(b"123456789")
+
+    original_stat = Path.stat
+
+    def stat_with_creation_date(path, *args, **kwargs):
+        stat_result = original_stat(path, *args, **kwargs)
+        values = list(stat_result)
+        values[9] = datetime.combine(
+            date(2026, 1, 15) if path == selected else date(2026, 1, 9),
+            datetime.min.time(),
+        ).timestamp()
+        return os.stat_result(values)
+
+    monkeypatch.setattr(Path, "stat", stat_with_creation_date)
+
+    result = gopro_archiver.get_mp4_selection_size(base, date(2026, 1, 10), date(2026, 1, 20))
+
+    assert result == 5
+
+
+def test_get_archive_target_path_uses_year_and_date(tmp_path, monkeypatch):
+    source_file = tmp_path / "12345678.MP4"
+    source_file.write_bytes(b"sample")
+    original_stat = Path.stat
+
+    def stat_with_creation_date(path, *args, **kwargs):
+        stat_result = original_stat(path, *args, **kwargs)
+        if path == source_file:
+            values = list(stat_result)
+            values[9] = datetime(2026, 9, 22).timestamp()
+            return os.stat_result(values)
+        return stat_result
+
+    monkeypatch.setattr(Path, "stat", stat_with_creation_date)
+
+    result = gopro_archiver.get_archive_target_path(tmp_path / "archive", source_file)
+
+    assert result == tmp_path / "archive" / "2026" / "2026-09-22" / "12345678.MP4"
+
+
+def test_resolve_archive_target_skips_identical_file(tmp_path):
+    source_file = tmp_path / "12345678.MP4"
+    source_file.write_bytes(b"same footage")
+    destination_file = gopro_archiver.get_archive_target_path(tmp_path / "archive", source_file)
+    destination_file.parent.mkdir(parents=True)
+    destination_file.write_bytes(source_file.read_bytes())
+
+    target, action = gopro_archiver.resolve_archive_target_path(tmp_path / "archive", source_file)
+
+    assert target == destination_file
+    assert action == "skip"
+
+
+def test_resolve_archive_target_renames_different_collision(tmp_path, monkeypatch):
+    source_file = tmp_path / "12345678.MP4"
+    source_file.write_bytes(b"new footage")
+    destination_file = tmp_path / "archive" / "2026" / "2026-09-22" / source_file.name
+    destination_file.parent.mkdir(parents=True)
+    destination_file.write_bytes(b"different footage")
+    original_stat = Path.stat
+
+    def stat_with_creation_date(path, *args, **kwargs):
+        stat_result = original_stat(path, *args, **kwargs)
+        if path == source_file:
+            values = list(stat_result)
+            values[9] = datetime(2026, 9, 22).timestamp()
+            return os.stat_result(values)
+        return stat_result
+
+    monkeypatch.setattr(Path, "stat", stat_with_creation_date)
+
+    target, action = gopro_archiver.resolve_archive_target_path(tmp_path / "archive", source_file)
+
+    assert target == destination_file.with_name("12345678_1.MP4")
+    assert action == "renamed"
+
+
+def test_copy_file_with_progress_removes_partial_file_on_cancel(tmp_path):
+    source_file = tmp_path / "source.MP4"
+    destination_file = tmp_path / "destination.MP4"
+    source_file.write_bytes(b"x" * (5 * 1024 * 1024))
+    callback_calls = 0
+
+    def record_chunk(_chunk_size):
+        nonlocal callback_calls
+        callback_calls += 1
+
+    completed = gopro_archiver.copy_file_with_progress(
+        source_file,
+        destination_file,
+        record_chunk,
+        lambda: callback_calls >= 1,
+    )
+
+    assert completed is False
+    assert not destination_file.exists()
+
+
+def test_get_storage_usage(tmp_path):
+    stats = gopro_archiver.get_storage_usage(str(tmp_path))
+
+    assert stats["total_bytes"] > 0
+    assert stats["free_bytes"] >= 0
+    assert 0 <= stats["used_percent"] <= 100
