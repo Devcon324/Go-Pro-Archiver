@@ -182,6 +182,88 @@ def test_resolve_archive_target_renames_different_collision(tmp_path, monkeypatc
     assert action == "renamed"
 
 
+def test_files_are_identical_uses_size_and_samples(tmp_path):
+    source_file = tmp_path / "source.MP4"
+    matching = tmp_path / "matching.MP4"
+    different_size = tmp_path / "different-size.MP4"
+    different_content = tmp_path / "different-content.MP4"
+    payload = b"head" + (b"x" * 1024) + b"tail"
+    source_file.write_bytes(payload)
+    matching.write_bytes(payload)
+    different_size.write_bytes(payload + b"extra")
+    different_content.write_bytes(b"HEAD" + (b"x" * 1024) + b"TAIL")
+
+    assert gopro_archiver.files_are_identical(source_file, matching)
+    assert not gopro_archiver.files_are_identical(source_file, different_size)
+    assert not gopro_archiver.files_are_identical(source_file, different_content)
+
+
+def test_resolve_archive_target_skips_identical_renamed_collision(tmp_path, monkeypatch):
+    source_file = tmp_path / "12345678.MP4"
+    source_file.write_bytes(b"same footage")
+    destination_file = tmp_path / "archive" / "2026" / "2026-09-22" / source_file.name
+    renamed_file = destination_file.with_name("12345678_1.MP4")
+    destination_file.parent.mkdir(parents=True)
+    destination_file.write_bytes(b"different")
+    renamed_file.write_bytes(b"same footage")
+    original_stat = Path.stat
+
+    def stat_with_creation_date(path, *args, **kwargs):
+        stat_result = original_stat(path, *args, **kwargs)
+        if path == source_file:
+            values = list(stat_result)
+            values[9] = datetime(2026, 9, 22).timestamp()
+            return os.stat_result(values)
+        return stat_result
+
+    monkeypatch.setattr(Path, "stat", stat_with_creation_date)
+
+    folder_indexes = gopro_archiver.build_destination_indexes(tmp_path / "archive", [source_file])
+    target, action = gopro_archiver.resolve_archive_target_path(
+        tmp_path / "archive",
+        source_file,
+        folder_indexes,
+    )
+
+    assert target == renamed_file
+    assert action == "skip"
+
+
+def test_analyze_archive_status_marks_missing_and_archived(tmp_path, monkeypatch):
+    source_dir = tmp_path / "card"
+    source_dir.mkdir()
+    archived = source_dir / "archived.MP4"
+    missing = source_dir / "missing.MP4"
+    archived.write_bytes(b"same footage")
+    missing.write_bytes(b"new footage")
+    original_stat = Path.stat
+
+    def stat_with_creation_date(path, *args, **kwargs):
+        stat_result = original_stat(path, *args, **kwargs)
+        if path in {archived, missing}:
+            values = list(stat_result)
+            values[9] = datetime(2026, 9, 22).timestamp()
+            return os.stat_result(values)
+        return stat_result
+
+    monkeypatch.setattr(Path, "stat", stat_with_creation_date)
+
+    destination_file = gopro_archiver.get_archive_target_path(tmp_path / "archive", archived)
+    destination_file.parent.mkdir(parents=True)
+    destination_file.write_bytes(archived.read_bytes())
+
+    results = {
+        file_path.name: action
+        for file_path, _target, action in gopro_archiver.analyze_archive_status(
+            tmp_path / "archive",
+            [archived, missing],
+        )
+    }
+
+    assert results["archived.MP4"] == "skip"
+    assert results["missing.MP4"] == "copy"
+
+
 def test_copy_file_with_progress_removes_partial_file_on_cancel(tmp_path):
     source_file = tmp_path / "source.MP4"
     destination_file = tmp_path / "destination.MP4"

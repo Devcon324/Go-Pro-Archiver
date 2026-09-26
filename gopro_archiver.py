@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import queue
@@ -105,25 +104,64 @@ def get_archive_target_path(destination_dir: str | os.PathLike[str], file_path: 
     return Path(destination_dir) / str(file_date.year) / file_date.isoformat() / source_file.name
 
 
+IDENTICAL_SAMPLE_BYTES = 256 * 1024
+
+
 def files_are_identical(source_file: str | os.PathLike[str], destination_file: str | os.PathLike[str]) -> bool:
     source_path = Path(source_file)
     destination_path = Path(destination_file)
     try:
-        if source_path.stat().st_size != destination_path.stat().st_size:
+        source_size = source_path.stat().st_size
+        if source_size != destination_path.stat().st_size:
             return False
+        if source_size == 0:
+            return True
 
-        source_hash = hashlib.sha256()
-        destination_hash = hashlib.sha256()
         with source_path.open("rb") as source_handle, destination_path.open("rb") as destination_handle:
-            while source_chunk := source_handle.read(1024 * 1024):
-                destination_chunk = destination_handle.read(len(source_chunk))
-                if source_chunk != destination_chunk:
-                    return False
-                source_hash.update(source_chunk)
-                destination_hash.update(destination_chunk)
-        return source_hash.digest() == destination_hash.digest()
+            head_size = min(IDENTICAL_SAMPLE_BYTES, source_size)
+            if source_handle.read(head_size) != destination_handle.read(head_size):
+                return False
+            if source_size <= IDENTICAL_SAMPLE_BYTES:
+                return True
+            tail_size = min(IDENTICAL_SAMPLE_BYTES, source_size - head_size)
+            source_handle.seek(source_size - tail_size)
+            destination_handle.seek(source_size - tail_size)
+            return source_handle.read(tail_size) == destination_handle.read(tail_size)
     except OSError:
         return False
+
+
+def index_archive_folder(folder: str | os.PathLike[str]) -> dict[str, int]:
+    folder_path = Path(folder)
+    names_to_sizes: dict[str, int] = {}
+    if not folder_path.exists():
+        return names_to_sizes
+
+    with os.scandir(folder_path) as entries:
+        for entry in entries:
+            if entry.is_file() and entry.name.lower().endswith(".mp4"):
+                names_to_sizes[entry.name] = entry.stat().st_size
+    return names_to_sizes
+
+
+def build_destination_indexes(
+    destination_dir: str | os.PathLike[str],
+    files: Iterable[Path],
+) -> dict[Path, dict[str, int]]:
+    folders = {get_archive_target_path(destination_dir, file_path).parent for file_path in files}
+    return {folder: index_archive_folder(folder) for folder in folders}
+
+
+def analyze_archive_status(
+    destination_dir: str | os.PathLike[str],
+    files: Iterable[Path],
+) -> list[tuple[Path, Path, str]]:
+    file_list = list(files)
+    folder_indexes = build_destination_indexes(destination_dir, file_list)
+    return [
+        (file_path, *resolve_archive_target_path(destination_dir, file_path, folder_indexes))
+        for file_path in file_list
+    ]
 
 
 def copy_file_with_progress(source_file: Path, destination_file: Path, progress_callback, should_stop) -> bool:
@@ -142,19 +180,38 @@ def copy_file_with_progress(source_file: Path, destination_file: Path, progress_
 def resolve_archive_target_path(
     destination_dir: str | os.PathLike[str],
     file_path: str | os.PathLike[str],
+    folder_indexes: dict[Path, dict[str, int]] | None = None,
 ) -> tuple[Path, str]:
     target_path = get_archive_target_path(destination_dir, file_path)
-    if not target_path.exists():
+    folder_index = None if folder_indexes is None else folder_indexes.get(target_path.parent)
+
+    def existing_size(candidate: Path) -> int | None:
+        if folder_index is not None:
+            return folder_index.get(candidate.name)
+        try:
+            return candidate.stat().st_size
+        except OSError:
+            return None
+
+    def is_duplicate(candidate: Path, size: int) -> bool:
+        source_size = Path(file_path).stat().st_size
+        if size != source_size:
+            return False
+        return files_are_identical(file_path, candidate)
+
+    current_size = existing_size(target_path)
+    if current_size is None:
         return target_path, "copy"
-    if files_are_identical(file_path, target_path):
+    if is_duplicate(target_path, current_size):
         return target_path, "skip"
 
     counter = 1
     while True:
         conflict_path = target_path.with_name(f"{target_path.stem}_{counter}{target_path.suffix}")
-        if not conflict_path.exists():
+        conflict_size = existing_size(conflict_path)
+        if conflict_size is None:
             return conflict_path, "renamed"
-        if files_are_identical(file_path, conflict_path):
+        if is_duplicate(conflict_path, conflict_size):
             return conflict_path, "skip"
         counter += 1
 
@@ -223,6 +280,7 @@ class TransferThread(threading.Thread):
 
     def run(self):
         files = self.selected_files if self.selected_files is not None else collect_mp4_files(self.source_dir, self.start_date, self.end_date)
+        destination_indexes = build_destination_indexes(self.destination_dir, files)
         total_bytes = sum(file.stat().st_size for file in files)
         copied_bytes = 0
         files_skipped = 0
@@ -232,6 +290,10 @@ class TransferThread(threading.Thread):
         start_time = time.monotonic()
         speed_history: list[float] = []
         cancelled = False
+        current_file_name = None
+        current_destination_path = None
+        current_action = None
+        current_file_index = 0
 
         def report_progress(file_index, current_speed):
             if self.callback:
@@ -250,6 +312,10 @@ class TransferThread(threading.Thread):
                         "files_skipped": files_skipped,
                         "files_renamed": files_renamed,
                         "total_files": len(files),
+                        "current_file": current_file_name,
+                        "destination_path": current_destination_path,
+                        "current_action": current_action,
+                        "current_file_index": current_file_index,
                     }
                 )
 
@@ -261,7 +327,16 @@ class TransferThread(threading.Thread):
                 break
 
             file_size = file_path.stat().st_size
-            target_file, action = resolve_archive_target_path(self.destination_dir, file_path)
+            target_file, action = resolve_archive_target_path(
+                self.destination_dir,
+                file_path,
+                destination_indexes,
+            )
+            current_file_name = file_path.name
+            current_destination_path = str(target_file)
+            current_action = action
+            current_file_index = idx
+            report_progress(idx - 1, speed_history[-1] if speed_history else 0.0)
             if action == "skip":
                 files_skipped += 1
             else:
@@ -286,8 +361,13 @@ class TransferThread(threading.Thread):
                 if action == "renamed":
                     files_renamed += 1
                 files_copied_count += 1
+                destination_indexes.setdefault(target_file.parent, {})[target_file.name] = file_size
             if action == "skip":
                 processed_bytes += file_size
+            current_file_name = None
+            current_destination_path = None
+            current_action = None
+            current_file_index = 0
             report_progress(idx, 0.0 if action == "skip" else speed_history[-1] if speed_history else 0.0)
 
         if self.callback:
@@ -336,6 +416,8 @@ class GoProArchiverApp(ctk.CTk):
         self.detected_devices = []
         self.selected_device = None
         self.transfer_thread = None
+        self.analyzing = False
+        self.analyze_generation = 0
         self.start_date_var = ctk.StringVar(value="")
         self.end_date_var = ctk.StringVar(value="")
         self.file_sort_key = "title"
@@ -543,12 +625,15 @@ class GoProArchiverApp(ctk.CTk):
 
         action_row = ctk.CTkFrame(form, fg_color="transparent")
         action_row.grid(row=row + 1, column=0, padx=20, pady=(12, 8), sticky="ew")
-        action_row.grid_columnconfigure(0, weight=1)
-        action_row.grid_columnconfigure(1, weight=0)
+        action_row.grid_columnconfigure(0, weight=0)
+        action_row.grid_columnconfigure(1, weight=1)
+        action_row.grid_columnconfigure(2, weight=0)
+        self.analyze_button = ctk.CTkButton(action_row, text="Analyze", width=90, command=self.start_analyze)
+        self.analyze_button.grid(row=0, column=0, padx=(0, 8), sticky="w")
         self.copy_button = ctk.CTkButton(action_row, text="Copy MP4 files", fg_color="#238636", hover_color="#196c2e", command=self.start_copy)
-        self.copy_button.grid(row=0, column=0, padx=(0, 8), sticky="ew")
+        self.copy_button.grid(row=0, column=1, padx=(0, 8), sticky="ew")
         self.cancel_button = ctk.CTkButton(action_row, text="Cancel", width=90, command=self.cancel_copy, state="disabled")
-        self.cancel_button.grid(row=0, column=1, sticky="e")
+        self.cancel_button.grid(row=0, column=2, sticky="e")
 
         self.progress_var = ctk.DoubleVar(value=0)
         self.progress = ctk.CTkProgressBar(form, variable=self.progress_var, height=18)
@@ -561,11 +646,18 @@ class GoProArchiverApp(ctk.CTk):
         status.grid_rowconfigure(2, weight=1)
         form.grid_rowconfigure(row + 3, weight=1)
 
-        self.status_label = ctk.CTkLabel(status, text="Ready", font=ctk.CTkFont(size=13, weight="bold"))
-        self.status_label.grid(row=0, column=0, padx=16, pady=(14, 6), sticky="w")
+        self.status_label = ctk.CTkLabel(
+            status,
+            text="Ready",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            anchor="w",
+            justify="left",
+        )
+        self.status_label.grid(row=0, column=0, padx=16, pady=(14, 6), sticky="ew")
 
-        self.meta_label = ctk.CTkLabel(status, text="Transfer speed: --\nETA: --\nFiles: --", justify="left")
-        self.meta_label.grid(row=1, column=0, padx=16, pady=(6, 14), sticky="w")
+        self.meta_label = ctk.CTkLabel(status, text="Transfer speed: --\nETA: --\nFiles: --", justify="left", anchor="w")
+        self.meta_label.grid(row=1, column=0, padx=16, pady=(6, 14), sticky="ew")
+        status.bind("<Configure>", lambda event: self.status_label.configure(wraplength=max(event.width - 32, 120)))
 
         self.graph_canvas = ctk.CTkCanvas(status, width=320, height=100, bg="#1d1e2a", highlightthickness=0)
         self.graph_canvas.grid(row=2, column=0, padx=16, pady=(0, 16), sticky="nsew")
@@ -727,6 +819,7 @@ class GoProArchiverApp(ctk.CTk):
 
     def refresh_file_preview(self):
         self.preview_generation += 1
+        self.analyze_generation += 1
         generation = self.preview_generation
         self.preview_metadata_labels = {}
         previous_selection = {
@@ -1003,7 +1096,11 @@ class GoProArchiverApp(ctk.CTk):
     def update_copy_button_state(self):
         if not hasattr(self, "copy_button"):
             return
-        if self.transfer_thread and self.transfer_thread.is_alive():
+        transferring = bool(self.transfer_thread and self.transfer_thread.is_alive())
+        analyzing = self.analyzing
+        if hasattr(self, "analyze_button"):
+            self.analyze_button.configure(state="disabled" if transferring or analyzing else "normal")
+        if transferring or analyzing:
             self.copy_button.configure(state="disabled")
             return
         used_bytes, total_bytes, selected_bytes = self.destination_storage_projection
@@ -1104,6 +1201,62 @@ class GoProArchiverApp(ctk.CTk):
 
         ctk.CTkButton(popup, text="Use selected date", command=apply_date).pack(padx=14, pady=(0, 14), fill="x")
 
+    def get_preview_files(self):
+        return [Path(file_path) for file_path in self.file_selection_vars]
+
+    def start_analyze(self):
+        destination = self.destination_var.get().strip()
+        if not destination or not os.path.exists(destination):
+            self.status_label.configure(text="Choose a destination archive to analyze.")
+            return
+        if self.transfer_thread and self.transfer_thread.is_alive():
+            return
+        files = self.get_preview_files()
+        if not files:
+            self.status_label.configure(text="No files to analyze. Select a GoPro first.")
+            return
+
+        self.analyze_generation += 1
+        generation = self.analyze_generation
+        self.analyzing = True
+        self.update_copy_button_state()
+        self.status_label.configure(text="Analyzing archive...")
+        self.meta_label.configure(text="Checking which files are already in the destination...")
+
+        def worker():
+            try:
+                results = analyze_archive_status(destination, files)
+            except OSError:
+                results = None
+            self.after(0, lambda: self.apply_analyze_results(results, generation))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def apply_analyze_results(self, results, generation):
+        self.analyzing = False
+        self.update_copy_button_state()
+        if generation != self.analyze_generation:
+            return
+        if results is None:
+            self.status_label.configure(text="Analyze failed. Check the destination folder.")
+            return
+
+        missing_paths = {str(file_path) for file_path, _target, action in results if action != "skip"}
+        archived_count = sum(1 for _file_path, _target, action in results if action == "skip")
+        for file_path, variable in self.file_selection_vars.items():
+            variable.set(file_path in missing_paths)
+        self.on_file_selection_changed()
+        missing_count = len(missing_paths)
+        self.status_label.configure(
+            text=f"Analyze complete: {archived_count} already archived, {missing_count} not present"
+        )
+        self.meta_label.configure(
+            text=(
+                f"Checked files now include only clips missing from the archive.\n"
+                f"Already archived: {archived_count}  |  Need copy: {missing_count}"
+            )
+        )
+
     def start_copy(self):
         source = self.source_var.get().strip()
         destination = self.destination_var.get().strip()
@@ -1125,6 +1278,8 @@ class GoProArchiverApp(ctk.CTk):
             return
 
         self.copy_button.configure(state="disabled")
+        if hasattr(self, "analyze_button"):
+            self.analyze_button.configure(state="disabled")
         self.cancel_button.configure(state="normal")
         self.progress.set(0)
         self.status_label.configure(text="Copying MP4 files...")
@@ -1208,9 +1363,19 @@ class GoProArchiverApp(ctk.CTk):
         eta_seconds = payload.get("eta_seconds", 0)
         files_processed = payload.get("files_processed", 0)
         total_files = payload.get("total_files", 0)
+        current_file = payload.get("current_file")
+        destination_path = payload.get("destination_path")
+        current_action = payload.get("current_action")
+        current_file_index = payload.get("current_file_index") or min(files_processed + 1, total_files)
 
         self.progress.set(completed)
-        self.status_label.configure(text=f"Processing {files_processed}/{total_files} files")
+        if current_file and destination_path:
+            action_label = "Skipping" if current_action == "skip" else "Copying"
+            self.status_label.configure(
+                text=f"{action_label} {current_file} ({current_file_index}/{total_files})\nto {destination_path}"
+            )
+        else:
+            self.status_label.configure(text=f"Processing {files_processed}/{total_files} files")
         now = time.monotonic()
         if now - self.last_eta_display_update >= 0.1:
             self.eta_display_value = eta_seconds
