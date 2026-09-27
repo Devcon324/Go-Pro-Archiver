@@ -1,14 +1,16 @@
+import json
 from pathlib import Path
 
 import gopro_archiver.devices as devices
+from tests.mock_data import MOCK_CARD_LABEL, MOCK_LINUX_USER, MOCK_SERIAL_ALT, mock_version_metadata
 
 
 def test_find_gopro_devices_under_linux_media_layout(tmp_path, monkeypatch):
-    card = tmp_path / "media" / "user" / "GOPRO"
+    card = tmp_path / "media" / MOCK_LINUX_USER / MOCK_CARD_LABEL
     (card / "DCIM" / "100GOPRO").mkdir(parents=True)
     (card / "MISC").mkdir(parents=True)
     (card / "MISC" / "version.txt").write_text(
-        '{"camera type": "HERO", "camera serial number": "ABC123"}',
+        json.dumps(mock_version_metadata(serial=MOCK_SERIAL_ALT)),
         encoding="utf-8",
     )
 
@@ -22,12 +24,12 @@ def test_find_gopro_devices_under_linux_media_layout(tmp_path, monkeypatch):
 
 def test_collect_mount_points_ignores_permission_errors(tmp_path, monkeypatch):
     media = tmp_path / "media"
-    user = media / "user"
-    gopro = user / "GOPRO"
-    gopro.mkdir(parents=True)
+    user = media / MOCK_LINUX_USER
+    card = user / MOCK_CARD_LABEL
+    card.mkdir(parents=True)
 
-    blocked = user / "pagefile.sys"
-    blocked.write_text("x")
+    blocked = user / "mock-blocked-entry.sys"
+    blocked.write_text("mock")
 
     original_is_dir = Path.is_dir
 
@@ -55,4 +57,4 @@ def test_collect_mount_points_ignores_permission_errors(tmp_path, monkeypatch):
     mount_points = devices.collect_mount_points()
 
     assert str(user) in mount_points
-    assert str(gopro) in mount_points
+    assert str(card) in mount_points

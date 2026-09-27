@@ -274,11 +274,11 @@ Each clip lands under the date taken (creation time on Windows; modification tim
 YourArchive/
 └── 2026/
     └── 2026-09-22/
-        ├── GX010034.MP4
-        └── GX010035.MP4
+        ├── MOCK0001.MP4
+        └── MOCK0002.MP4
 ```
 
-If the same filename exists with **different** content, the new file is saved as `GX010034_1.MP4`, and so on. Identical files are **skipped**.
+If the same filename exists with **different** content, the new file is saved as `MOCK0001_1.MP4`, and so on. Identical files are **skipped**.
 
 ---
 
